@@ -4,7 +4,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# Railway Environment Variables - Do NOT hardcode them
+# Railway Variables
 FB_TOKEN         = os.getenv("FB_TOKEN")
 FB_PAGE_ID       = os.getenv("FB_PAGE_ID")
 FOOTBALL_KEY     = os.getenv("FOOTBALL_KEY")
@@ -17,27 +17,14 @@ FB_POST_URL      = f"https://graph.facebook.com/{FB_PAGE_ID}/feed"
 STATE_FILE       = "match_state.json"
 PAGE_NAME        = "ScoreLine Live"
 
-LIVE_UPDATE_INTERVAL = 300  # 5 minutes - good balance for instant feeling
+LIVE_UPDATE_INTERVAL = 300  # 5 minutes
 
-# ── Leagues & Config ─────────────────────────────────────────────
-LEAGUES = {
-    "PL":"Premier League", "PD":"La Liga", "SA":"Serie A", "BL1":"Bundesliga",
-    "FL1":"Ligue 1", "CL":"Champions League"
+# ── Big Teams (Live updates only for these) ─────────────────────
+BIG_TEAMS = {
+    "England", "Spain", "Germany", "France", "Brazil", "Argentina", "Portugal",
+    "Italy", "Netherlands", "Belgium", "Uruguay", "Switzerland", "Norway", "Serbia",
+    "Morocco", "Nigeria", "Ghana", "Ivory Coast", "USA", "Japan", "South Korea"
 }
-
-LEAGUE_FLAGS = {
-    "PL":"🏴󠁧󠁢󠁥󠁮󠁧󠁿", "PD":"🇪🇸", "SA":"🇮🇹", "BL1":"🇩🇪", "FL1":"🇫🇷", 
-    "CL":"🏆", "INTL":"🌍"
-}
-
-LEAGUE_HASHTAGS = {
-    "PL":"#PremierLeague #EPL", "PD":"#LaLiga", "SA":"#SerieA", 
-    "BL1":"#Bundesliga", "FL1":"#Ligue1", "CL":"#ChampionsLeague",
-    "INTL":"#InternationalFootball #WorldCup2026"
-}
-
-TOP_NATIONS = {"England","Spain","Germany","France","Brazil","Argentina","Portugal",
-               "Italy","Netherlands","Belgium","Uruguay","Switzerland","Norway","Serbia"}
 
 # ── State ────────────────────────────────────────────────────────
 def load_state():
@@ -46,9 +33,9 @@ def load_state():
             with open(STATE_FILE) as f:
                 d = json.load(f)
                 return (
-                    set(d.get("goals",[])), set(d.get("cards",[])), 
-                    set(d.get("halftimes",[])), set(d.get("fulltimes",[])),
-                    set(d.get("kickoffs",[])), d.get("match_last_update", {})
+                    set(d.get("goals", [])), set(d.get("cards", [])),
+                    set(d.get("halftimes", [])), set(d.get("fulltimes", [])),
+                    set(d.get("kickoffs", [])), d.get("match_last_update", {})
                 )
         except:
             pass
@@ -67,7 +54,7 @@ def save_state():
             "match_last_update": match_last_update
         }, f)
 
-# ── API Functions ────────────────────────────────────────────────
+# ── API Helpers ──────────────────────────────────────────────────
 def livescore_get(path):
     if not LIVESCORE_KEY or not LIVESCORE_SECRET: return None
     try:
@@ -94,20 +81,18 @@ def post_to_facebook(msg):
     try:
         r = requests.post(FB_POST_URL, data={"message": msg, "access_token": FB_TOKEN}, timeout=10)
         if r.status_code == 200:
-            print(f"[POSTED] {msg[:70]}...")
+            print(f"[POSTED] {msg[:80]}...")
             return True
         print(f"[FB ERROR] {r.status_code}")
     except Exception as e:
         print(f"[FB ERROR] {e}")
     return False
 
-# ── Safe livescore normalizer (Fixed crash) ──────────────────────
+# ── Safe Normalization ───────────────────────────────────────────
 def norm_ls(m):
     def safe_name(field):
-        if isinstance(field, dict):
-            return field.get("name", "") or str(field)
-        if isinstance(field, str):
-            return field.strip()
+        if isinstance(field, dict): return field.get("name", "") or str(field)
+        if isinstance(field, str): return field.strip()
         return str(field or "")
 
     home = m.get("home_name") or safe_name(m.get("home")) or ""
@@ -120,11 +105,10 @@ def norm_ls(m):
             p = score_raw.replace(" ", "").split(":")
             if len(p) == 2 and p[0].isdigit():
                 hs, as_ = int(p[0]), int(p[1])
-    except:
-        pass
+    except: pass
 
-    raw_status = str(m.get("status") or "NOT STARTED").upper()
-    status = {"IN PLAY":"IN_PLAY", "HALF TIME":"PAUSED", "FULL TIME":"FINISHED", "LIVE":"IN_PLAY"}.get(raw_status, "SCHEDULED")
+    raw = str(m.get("status") or "NOT STARTED").upper()
+    status = {"IN PLAY":"IN_PLAY", "HALF TIME":"PAUSED", "FULL TIME":"FINISHED", "LIVE":"IN_PLAY"}.get(raw, "SCHEDULED")
 
     return {
         "id": f"ls_{m.get('id','')}",
@@ -135,43 +119,48 @@ def norm_ls(m):
         "homeTeam": {"shortName": home},
         "awayTeam": {"shortName": away},
         "score": {"fullTime": {"home": hs, "away": as_}},
-        "goals": [], "bookings": []
+        "goals": m.get("events", []) if isinstance(m.get("events"), list) else []
     }
 
-# ── Fetch Big Internationals ─────────────────────────────────────
+# ── Improved Fetch with Strong Filtering ─────────────────────────
 def fetch_intl_today():
     today = datetime.utcnow().strftime("%Y-%m-%d")
-    print(f"[INTL] Fetching today's internationals ({today})...")
+    print(f"[INTL] Fetching important internationals ({today})...")
 
     matches = []
     seen = set()
 
     def add(m):
-        key = f"{m['homeTeam']['shortName']}_{m['awayTeam']['shortName']}"
-        if key not in seen:
+        home = m["homeTeam"].get("shortName", "")
+        away = m["awayTeam"].get("shortName", "")
+        key = f"{home}_{away}"
+        if key not in seen and home and away:
             seen.add(key)
             matches.append(m)
 
-    # Livescore
+    # Livescore with basic filter
     data = livescore_get(f"/fixtures/matches.json?date={today}")
     if data:
         items = data if isinstance(data, list) else data.get("match", [])
         for item in items:
             if isinstance(item, dict):
-                add(norm_ls(item))
+                normalized = norm_ls(item)
+                # Only keep matches involving at least one big team or decent competition
+                if is_important_match(normalized):
+                    add(normalized)
 
-    # API-Football + Priority Search for big nations
+    # API-Football
     if APIFOOTBALL_KEY:
         data = apifootball_get(f"/fixtures?date={today}")
         if data:
             for fx in data.get("response", []):
                 lg_name = fx.get("league", {}).get("name", "").lower()
-                if any(club in lg_name for club in ["premier","la liga","serie a","bundesliga","ligue 1"]):
+                if any(x in lg_name for x in ["premier league","la liga","serie a","bundesliga","ligue 1"]):
                     continue
                 home = fx.get("teams", {}).get("home", {}).get("name", "")
                 away = fx.get("teams", {}).get("away", {}).get("name", "")
                 if home and away:
-                    add({
+                    m = {
                         "id": f"apif_{fx.get('fixture',{}).get('id')}",
                         "utcDate": fx.get("fixture", {}).get("date", ""),
                         "status": fx.get("fixture", {}).get("status", {}).get("short", "SCHEDULED"),
@@ -180,11 +169,29 @@ def fetch_intl_today():
                         "homeTeam": {"shortName": home},
                         "awayTeam": {"shortName": away},
                         "score": {"fullTime": {"home": None, "away": None}},
-                        "goals": [], "bookings": []
-                    })
+                        "goals": fx.get("events", [])
+                    }
+                    if is_important_match(m):
+                        add(m)
 
-    print(f"[INTL] Total matches fetched: {len(matches)}")
+    print(f"[INTL] Filtered important matches: {len(matches)} (from hundreds)")
     return matches
+
+def is_important_match(m):
+    home = m["homeTeam"].get("shortName", "")
+    away = m["awayTeam"].get("shortName", "")
+    comp = m.get("_comp_name", "").lower()
+    
+    # Big team involved
+    if home in BIG_TEAMS or away in BIG_TEAMS:
+        return True
+    
+    # Important competitions
+    important_comps = ["friendly", "nations league", "world cup", "euro", "afcon", "copa america", "finalissima", "qualifier"]
+    if any(word in comp for word in important_comps):
+        return True
+    
+    return False
 
 # ── Helpers ──────────────────────────────────────────────────────
 def get_score(m):
@@ -197,16 +204,46 @@ def flag(m): return LEAGUE_FLAGS.get(m.get("_league_code"), "🌍")
 def hashtags(m): return LEAGUE_HASHTAGS.get(m.get("_league_code"), "#Football")
 def comp(m): return m.get("_comp_name", "International")
 
+def is_big_match(m):
+    home = m["homeTeam"].get("shortName", "")
+    away = m["awayTeam"].get("shortName", "")
+    return home in BIG_TEAMS or away in BIG_TEAMS
+
 def get_minute(m):
     try:
-        ko = datetime.strptime(m["utcDate"], "%Y-%m-%dT%H:%M:%SZ")
+        ko = datetime.strptime(m.get("utcDate", ""), "%Y-%m-%dT%H:%M:%SZ")
         elapsed = (datetime.utcnow() - ko).total_seconds() / 60
         return int(max(1, elapsed))
     except:
         return "?"
 
-# ── Live Score Update (every 5 min) ──────────────────────────────
+# ── Goal Detection ───────────────────────────────────────────────
+def handle_goals(m):
+    mid = m["id"]
+    home, away, hs, as_ = get_score(m)
+    for g in m.get("goals", []):
+        if not isinstance(g, dict): continue
+        minute = g.get("minute") or g.get("time", "?")
+        scorer = g.get("player", {}).get("name") or g.get("scorer", "Unknown")
+        team   = g.get("team", {}).get("name") or g.get("team", "")
+        key = f"{mid}_{team}_{minute}_{scorer}"
+
+        if key not in posted_goals:
+            posted_goals.add(key)
+            save_state()
+
+            msg = (f"⚽ GOAL! {scorer} scores at {minute}'\n\n"
+                   f"{home} {hs} – {as_} {away}\n\n"
+                   f"What a strike! 🔥 Who wins from here? 👇\n\n"
+                   f"{flag(m)} {comp(m)} | {hashtags(m)} #Goal #LiveFootball\n\n"
+                   f"Follow {PAGE_NAME} 🔔")
+            post_to_facebook(msg)
+
+# ── Live Update (Only Big Teams) ─────────────────────────────────
 def handle_live_update(m):
+    if not is_big_match(m):
+        return
+
     mid = m["id"]
     now = time.time()
     if now - match_last_update.get(mid, 0) < LIVE_UPDATE_INTERVAL:
@@ -217,21 +254,22 @@ def handle_live_update(m):
     match_last_update[mid] = now
     save_state()
 
-    msg = f"📍 {minute}' | {home} {hs}–{as_} {away}\n\n🔥 Match is live! Who scores next? 👇\n\n{flag(m)} {comp(m)} | {hashtags(m)} #LiveUpdate\n\nFollow {PAGE_NAME} 🔔"
+    msg = f"📍 {minute}' | {home} {hs}–{as_} {away}\n\n🔥 Big match live! Who scores next? 👇\n\n{flag(m)} {comp(m)} | {hashtags(m)} #LiveUpdate\n\nFollow {PAGE_NAME} 🔔"
     post_to_facebook(msg)
 
-# ── Process Match ────────────────────────────────────────────────
+# ── Process ──────────────────────────────────────────────────────
 def process(m):
     status = m.get("status", "")
+
     if status == "IN_PLAY":
-        # Kickoff (only once)
         key = f"{m['id']}_kickoff"
         if key not in posted_kickoffs:
             posted_kickoffs.add(key)
             save_state()
-            post_to_facebook(f"🟢 KICK OFF | {m['homeTeam']['shortName']} vs {m['awayTeam']['shortName']}\n\nThe match is underway! 🔥\n\n{flag(m)} {comp(m)}")
+            post_to_facebook(f"🟢 KICK OFF | {m['homeTeam']['shortName']} vs {m['awayTeam']['shortName']}\n\nUnderway! 🔥\n\n{flag(m)} {comp(m)}")
 
-        handle_live_update(m)   # Every 5 minutes
+        handle_goals(m)
+        handle_live_update(m)
 
     elif status == "PAUSED":
         key = f"{m['id']}_halftime"
@@ -239,7 +277,7 @@ def process(m):
             posted_halftimes.add(key)
             save_state()
             home, away, hs, as_ = get_score(m)
-            post_to_facebook(f"⏸️ HALF TIME | {home} {hs}–{as_} {away}\n\nWhat are your thoughts? 👇")
+            post_to_facebook(f"⏸️ HALF TIME | {home} {hs}–{as_} {away}")
 
     elif status == "FINISHED":
         key = f"{m['id']}_fulltime"
@@ -247,15 +285,15 @@ def process(m):
             posted_ft.add(key)
             save_state()
             home, away, hs, as_ = get_score(m)
-            post_to_facebook(f"🏁 FULL TIME | {home} {hs}–{as_} {away}\n\nGreat match! Rate it 👇")
+            post_to_facebook(f"🏁 FULL TIME | {home} {hs}–{as_} {away}")
 
-# ── Main Loop ────────────────────────────────────────────────────
+# ── Main ─────────────────────────────────────────────────────────
 def run():
-    print(f"{PAGE_NAME} Bot Started - Live updates every 5 minutes 🔥")
+    print(f"{PAGE_NAME} Bot v2.5 – Optimized + Big Teams Live Updates")
     while True:
         try:
-            intl_matches = fetch_intl_today()
-            for m in intl_matches[:12]:        # Top 12 matches
+            matches = fetch_intl_today()
+            for m in matches[:15]:          # Limit to top 15 important matches
                 process(m)
         except Exception as e:
             print(f"[ERROR] {e}")
