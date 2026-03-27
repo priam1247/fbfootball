@@ -390,6 +390,30 @@ def norm_ls(m, default_comp="International"):
     }
 
 # ── Fetch today's internationals ──────────────────────────────────
+# ── Priority nations always tracked ─────────────────────────────
+PRIORITY_NATIONS = {
+    "Brazil","France","England","Spain","Germany","Argentina",
+    "Portugal","Italy","Netherlands","Belgium","Morocco","Norway",
+    "Uruguay","Colombia","Mexico","USA","Japan","South Korea",
+    "Senegal","Egypt","Nigeria","Ghana","Ivory Coast","Switzerland",
+    "Denmark","Croatia","Austria","Serbia","Poland","Turkey",
+    "Sweden","Scotland","Wales","Ireland","Ukraine","Algeria",
+    "Saudi Arabia","Iran","Australia","Czech Republic","Tunisia",
+}
+
+def make_intl_match(home, away, comp="International Friendly",
+                    status="SCHEDULED", utc_date="", uid=None):
+    mid = uid or f"manual_{home}_{away}".replace(" ","_")
+    return {
+        "id": mid, "utcDate": utc_date, "status": status,
+        "_comp_name": comp, "_comp_flag": "🌍", "_league_code": "INTL",
+        "homeTeam": {"id":"","name":home,"shortName":home},
+        "awayTeam": {"id":"","name":away,"shortName":away},
+        "score": {"halfTime":{"home":None,"away":None},
+                  "fullTime":{"home":None,"away":None}},
+        "goals":[], "bookings":[], "lineups":[],
+    }
+
 def fetch_intl_today():
     global _intl_matches, _intl_date
     today = datetime.utcnow().strftime("%Y-%m-%d")
@@ -398,8 +422,14 @@ def fetch_intl_today():
 
     print(f"[INTL] Fetching today's international fixtures ({today})...")
     matches = []
+    seen_ids = set()
 
-    # 1. livescore-api.com (free trial — best option)
+    def add(m):
+        if m["id"] not in seen_ids:
+            seen_ids.add(m["id"])
+            matches.append(m)
+
+    # 1. livescore-api.com — collect ALL, don't return early
     if LIVESCORE_KEY and LIVESCORE_SECRET:
         data = livescore_get(f"/fixtures/matches.json?date={today}")
         if not data:
@@ -409,11 +439,9 @@ def fetch_intl_today():
             for m in items:
                 n = norm_ls(m)
                 if n["homeTeam"]["shortName"] and n["awayTeam"]["shortName"]:
-                    matches.append(n)
+                    add(n)
             if matches:
                 print(f"[INTL] livescore-api.com: {len(matches)} matches today")
-                _intl_matches, _intl_date = matches, today
-                return matches
 
     # 2. RapidAPI free live football
     if RAPIDAPI_KEY:
@@ -437,75 +465,103 @@ def fetch_intl_today():
                 })
             if matches:
                 print(f"[INTL] RapidFree: {len(matches)} live matches")
-                _intl_matches, _intl_date = matches, today
-                return matches
+                # Don't return early — still run API-Football for big nations
 
-    # 3. API-Football (100/day fallback)
+    # 3. API-Football — fetch ALL fixtures and filter internationals
     if APIFOOTBALL_KEY:
-        data = apifootball_get(f"/fixtures?date={today}")
-        if data:
-            CLUB = ["premier league","la liga","serie a","bundesliga","ligue 1","championship",
-                    "eredivisie","primeira liga","super lig","mls","brasileirao",
-                    "champions league","europa league","conference league","fa cup",
-                    "copa del rey","dfb-pokal","coppa italia","carabao"]
-            INTL = ["world cup","qualifier","friendly","friendlies","nations league",
-                    "international","afcon","gold cup","concacaf","copa america",
-                    "afc","uefa","fifa","playoff","amical","amistoso","olympics",
-                    "qualification","euro","african","asian","conmebol","ofc"]
-            INTL_C = {"world","europe","south america","north america","africa","asia","oceania"}
-            SMAP   = {"NS":"SCHEDULED","TBD":"TIMED","1H":"IN_PLAY","2H":"IN_PLAY",
-                      "ET":"IN_PLAY","P":"IN_PLAY","BT":"PAUSED","HT":"PAUSED",
-                      "FT":"FINISHED","AET":"FINISHED","PEN":"FINISHED",
-                      "AWD":"FINISHED","WO":"FINISHED","PST":"POSTPONED","CANC":"CANCELLED"}
-            for fx in data.get("response",[]):
-                lg  = fx.get("league",{})
-                ln  = lg.get("name","").lower()
-                lt  = lg.get("type","").lower()
-                country = lg.get("country","")
-                lc  = (country.get("name","") if isinstance(country, dict) else country).lower()
-                if any(k in ln for k in CLUB): continue
-                if not (lt in ("cup","international","friendly") or
-                        any(k in ln for k in INTL) or lc in INTL_C): continue
-                fix   = fx.get("fixture",{})
-                teams = fx.get("teams",{})
-                goals = fx.get("goals",{})
-                sc    = fx.get("score",{})
-                hn    = teams.get("home",{}).get("name","")
-                an    = teams.get("away",{}).get("name","")
-                if not hn or not an: continue
-                gs, bks = [], []
-                for ev in fx.get("events",[]):
-                    et = ev.get("type","").lower()
-                    dt = ev.get("detail","").lower()
-                    pl = ev.get("player",{}).get("name","Unknown")
-                    mn = ev.get("time",{}).get("elapsed","?")
-                    at = (ev.get("assist") or {})
-                    tm = ev.get("team",{}).get("name","")
-                    if et == "goal" and "missed" not in dt:
-                        sfx = " (pen)" if "penalty" in dt else " (OG)" if "own" in dt else ""
-                        gs.append({"minute":mn,"scorer":{"name":f"{pl}{sfx}"},
-                                   "assist":{"name":at.get("name","")} if at.get("name") else {},
-                                   "team":{"shortName":tm}})
-                    elif et == "card" and "red" in dt:
-                        bks.append({"minute":mn,"card":"RED_CARD",
-                                    "player":{"name":pl},"team":{"shortName":tm}})
-                matches.append({
-                    "id":f"apif_{fix.get('id','')}",
-                    "utcDate":fix.get("date",""),
-                    "status":SMAP.get(fix.get("status",{}).get("short",""),"SCHEDULED"),
-                    "_comp_name":lg.get("name","International"),
-                    "_comp_flag":"🌍","_league_code":"INTL",
-                    "homeTeam":{"id":str(teams.get("home",{}).get("id","")),"name":hn,"shortName":hn},
-                    "awayTeam":{"id":str(teams.get("away",{}).get("id","")),"name":an,"shortName":an},
-                    "score":{"halfTime":{"home":sc.get("halftime",{}).get("home"),
-                                         "away":sc.get("halftime",{}).get("away")},
-                             "fullTime":{"home":goals.get("home"),"away":goals.get("away")}},
-                    "goals":gs,"bookings":bks,"lineups":[],
-                    "_apif_fixture_id":fix.get("id",""),
-                })
-            if matches:
-                print(f"[INTL] API-Football: {len(matches)} international matches")
+        CLUB = ["premier league","la liga","serie a","bundesliga","ligue 1","championship",
+                "eredivisie","primeira liga","super lig","mls","brasileirao",
+                "champions league","europa league","conference league","fa cup",
+                "copa del rey","dfb-pokal","coppa italia","carabao"]
+        INTL = ["world cup","qualifier","friendly","friendlies","nations league",
+                "international","afcon","gold cup","concacaf","copa america",
+                "afc","uefa","fifa","playoff","amical","amistoso","olympics",
+                "qualification","euro","african","asian","conmebol","ofc"]
+        INTL_C = {"world","europe","south america","north america","africa","asia","oceania"}
+        SMAP   = {"NS":"SCHEDULED","TBD":"TIMED","1H":"IN_PLAY","2H":"IN_PLAY",
+                  "ET":"IN_PLAY","P":"IN_PLAY","BT":"PAUSED","HT":"PAUSED",
+                  "FT":"FINISHED","AET":"FINISHED","PEN":"FINISHED",
+                  "AWD":"FINISHED","WO":"FINISHED","PST":"POSTPONED","CANC":"CANCELLED"}
 
+        def parse_apif_fixture(fx):
+            lg    = fx.get("league",{})
+            ln    = lg.get("name","").lower()
+            lt    = lg.get("type","").lower()
+            country = lg.get("country","")
+            lc    = (country.get("name","") if isinstance(country, dict) else country).lower()
+            if any(k in ln for k in CLUB): return None
+            if not (lt in ("cup","international","friendly") or
+                    any(k in ln for k in INTL) or lc in INTL_C): return None
+            fix   = fx.get("fixture",{})
+            teams = fx.get("teams",{})
+            goals = fx.get("goals",{})
+            sc    = fx.get("score",{})
+            hn    = teams.get("home",{}).get("name","")
+            an    = teams.get("away",{}).get("name","")
+            if not hn or not an: return None
+            gs, bks = [], []
+            for ev in fx.get("events",[]):
+                et = ev.get("type","").lower()
+                dt = ev.get("detail","").lower()
+                pl = ev.get("player",{}).get("name","Unknown")
+                mn = ev.get("time",{}).get("elapsed","?")
+                at = (ev.get("assist") or {})
+                tm = ev.get("team",{}).get("name","")
+                if et == "goal" and "missed" not in dt:
+                    sfx = " (pen)" if "penalty" in dt else " (OG)" if "own" in dt else ""
+                    gs.append({"minute":mn,"scorer":{"name":f"{pl}{sfx}"},
+                               "assist":{"name":at.get("name","")} if at.get("name") else {},
+                               "team":{"shortName":tm}})
+                elif et == "card" and "red" in dt:
+                    bks.append({"minute":mn,"card":"RED_CARD",
+                                "player":{"name":pl},"team":{"shortName":tm}})
+            return {
+                "id":f"apif_{fix.get('id','')}",
+                "utcDate":fix.get("date",""),
+                "status":SMAP.get(fix.get("status",{}).get("short",""),"SCHEDULED"),
+                "_comp_name":lg.get("name","International"),
+                "_comp_flag":"🌍","_league_code":"INTL",
+                "homeTeam":{"id":str(teams.get("home",{}).get("id","")),"name":hn,"shortName":hn},
+                "awayTeam":{"id":str(teams.get("away",{}).get("id","")),"name":an,"shortName":an},
+                "score":{"halfTime":{"home":sc.get("halftime",{}).get("home"),
+                                     "away":sc.get("halftime",{}).get("away")},
+                         "fullTime":{"home":goals.get("home"),"away":goals.get("away")}},
+                "goals":gs,"bookings":bks,"lineups":[],
+                "_apif_fixture_id":fix.get("id",""),
+            }
+
+        # Fetch all today's fixtures
+        data = apifootball_get(f"/fixtures?date={today}")
+        apif_count = 0
+        if data:
+            for fx in data.get("response",[]):
+                m = parse_apif_fixture(fx)
+                if m:
+                    add(m)
+                    apif_count += 1
+            if apif_count:
+                print(f"[INTL] API-Football: {apif_count} international matches merged")
+
+        # Also search specifically for each priority nation to make sure none are missed
+        already_has = {
+            n.lower()
+            for mx in matches
+            for n in [mx["homeTeam"]["shortName"], mx["awayTeam"]["shortName"]]
+        }
+        missing = [n for n in PRIORITY_NATIONS if n.lower() not in already_has]
+        if missing:
+            print(f"[INTL] Searching API-Football for {len(missing)} missing priority nations...")
+            for nation in missing[:10]:  # max 10 extra calls to save budget
+                nd = apifootball_get(f"/fixtures?date={today}&search={requests.utils.quote(nation)}")
+                if nd:
+                    for fx in nd.get("response",[]):
+                        m = parse_apif_fixture(fx)
+                        if m:
+                            add(m)
+                            print(f"[INTL] Found via search: {m['homeTeam']['shortName']} vs {m['awayTeam']['shortName']}")
+
+    total = len(matches)
+    print(f"[INTL] Total fixtures after merge: {total}")
     _intl_matches, _intl_date = matches, today
     return matches
 
