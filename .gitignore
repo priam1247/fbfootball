@@ -1,0 +1,6 @@
+.env
+match_state.json
+news_state.json
+__pycache__/
+*.pyc
+*.pyo
