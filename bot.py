@@ -268,7 +268,8 @@ def importance(match):
     away  = match.get("awayTeam", {}).get("shortName", "")
     if home in TOP_NATIONS: score += 10
     if away in TOP_NATIONS: score += 10
-    comp = match.get("_comp_name","").lower()
+    _cn = match.get("_comp_name","")
+    comp = (_cn if isinstance(_cn, str) else "").lower()
     if any(k in comp for k in ["world cup","qualifier","playoff"]): score += 15
     if any(k in comp for k in ["nations league"]):                  score += 12
     if any(k in comp for k in ["afcon","copa america","gold cup","asian cup","euro"]): score += 12
@@ -450,7 +451,8 @@ def fetch_intl_today():
                 lg  = fx.get("league",{})
                 ln  = lg.get("name","").lower()
                 lt  = lg.get("type","").lower()
-                lc  = lg.get("country","").lower()
+                country = lg.get("country","")
+                lc  = (country.get("name","") if isinstance(country, dict) else country).lower()
                 if any(k in ln for k in CLUB): continue
                 if not (lt in ("cup","international","friendly") or
                         any(k in ln for k in INTL) or lc in INTL_C): continue
