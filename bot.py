@@ -847,6 +847,16 @@ def check_matches():
     # Top 10 for live coverage
     top10 = top_matches(all_matches, n=10)
 
+    # Debug: show what was selected
+    print("[DEBUG] Top 10 selected matches:")
+    for mx in top10:
+        h  = mx.get("homeTeam",{}).get("shortName","?")
+        a  = mx.get("awayTeam",{}).get("shortName","?")
+        c  = mx.get("_comp_name","?")
+        s  = mx.get("status","?")
+        sc = importance(mx)
+        print(f"  [{s}] {h} vs {a} | {c} | score={sc}")
+
     has_live = any(
         mx.get("status") in ("IN_PLAY","PAUSED")
         for ms in all_matches.values() for mx in ms
