@@ -193,13 +193,19 @@ _intl_last_live  = 0
 LIVE_INTERVAL    = 60
 
 # ── API calls ─────────────────────────────────────────────────────
+_fdorg_rate_limited_until = 0
+
 def football_get(path):
+    global _fdorg_rate_limited_until
+    if time.time() < _fdorg_rate_limited_until:
+        return None  # still cooling down, skip silently
     try:
         r = requests.get(f"{FOOTBALL_BASE}{path}",
                          headers={"X-Auth-Token": FOOTBALL_KEY}, timeout=10)
         if r.status_code == 200: return r.json()
         if r.status_code == 429:
-            print("[WARN] football-data.org rate limit"); time.sleep(60)
+            _fdorg_rate_limited_until = time.time() + 65  # back off for 65s
+            print("[WARN] football-data.org rate limit — pausing 65s")
     except Exception as e:
         print(f"[ERROR] football-data.org: {e}")
     return None
@@ -279,12 +285,15 @@ def importance(match):
     score += nation_score(away)
     _cn = match.get("_comp_name","")
     comp = (_cn if isinstance(_cn, str) else "").lower()
-    if any(k in comp for k in ["world cup","qualifier","playoff"]): score += 15
-    if any(k in comp for k in ["nations league"]):                  score += 12
-    if any(k in comp for k in ["afcon","copa america","gold cup","asian cup","euro"]): score += 12
-    if "friendly" in comp or "amical" in comp or "amistoso" in comp: score += 5
+    if any(k in comp for k in ["world cup","qualifier","playoff"]): score += 20
+    if any(k in comp for k in ["nations league"]):                  score += 16
+    if any(k in comp for k in ["afcon","copa america","gold cup","asian cup","euro"]): score += 16
+    if "friendly" in comp or "amical" in comp or "amistoso" in comp: score += 6
     code = match.get("_league_code","")
     if code in ("PL","PD","SA","BL1","FL1","CL"): score += 8
+    # Bonus: INTL matches involving top nations get extra push to beat club games
+    if code == "INTL" and (nation_score(home) >= 10 or nation_score(away) >= 10):
+        score += 10
     return score
 
 def top_matches(all_matches, n=10):
@@ -335,23 +344,38 @@ def norm_ls(m, default_comp="International"):
     }
     raw    = (m.get("status") or m.get("time") or "NOT STARTED").upper().strip()
     status = STATUS.get(raw, "SCHEDULED")
-    home   = m.get("home_name", m.get("home",{}).get("name",""))
-    away   = m.get("away_name", m.get("away",{}).get("name",""))
 
-    # Score
+    # Safe home/away extraction — livescore sometimes returns string, sometimes dict
+    home_raw = m.get("home", {})
+    away_raw = m.get("away", {})
+    home = (m.get("home_name")
+            or (home_raw.get("name","") if isinstance(home_raw, dict) else str(home_raw))
+            or "")
+    away = (m.get("away_name")
+            or (away_raw.get("name","") if isinstance(away_raw, dict) else str(away_raw))
+            or "")
+
+    # Score — guard against non-string score fields
     hs = as_ = ht_h = ht_a = None
     try:
-        p = m.get("score","").replace(" ","").split(":")
+        score_raw = m.get("score", "")
+        if not isinstance(score_raw, str): score_raw = ""
+        p = score_raw.replace(" ","").split(":")
         if len(p)==2 and p[0].isdigit(): hs,as_ = int(p[0]),int(p[1])
     except Exception: pass
     try:
-        p = m.get("ht_score","").replace(" ","").split(":")
+        ht_raw = m.get("ht_score", "")
+        if not isinstance(ht_raw, str): ht_raw = ""
+        p = ht_raw.replace(" ","").split(":")
         if len(p)==2 and p[0].isdigit(): ht_h,ht_a = int(p[0]),int(p[1])
     except Exception: pass
 
-    # Events
+    # Events — guard against non-list events
     goals, bookings = [], []
-    for ev in (m.get("events") or []):
+    events_raw = m.get("events") or []
+    if not isinstance(events_raw, list): events_raw = []
+    for ev in events_raw:
+        if not isinstance(ev, dict): continue
         etype  = (ev.get("type") or "").lower()
         player = ev.get("player","Unknown")
         minute = ev.get("minute","?")
@@ -368,10 +392,14 @@ def norm_ls(m, default_comp="International"):
             bookings.append({"minute":minute,"card":"RED_CARD",
                              "player":{"name":player},"team":{"shortName":team}})
 
-    # Lineups
+    # Lineups — guard against non-dict lineup field
     lineups = []
-    hl = m.get("lineup",{}).get("home",[])
-    al = m.get("lineup",{}).get("away",[])
+    lineup_raw = m.get("lineup", {})
+    if not isinstance(lineup_raw, dict): lineup_raw = {}
+    hl = lineup_raw.get("home", [])
+    al = lineup_raw.get("away", [])
+    if not isinstance(hl, list): hl = []
+    if not isinstance(al, list): al = []
     if hl: lineups.append({"startXI":[{"player":{"name":p}} for p in hl]})
     if al: lineups.append({"startXI":[{"player":{"name":p}} for p in al]})
 
@@ -881,7 +909,7 @@ def check_matches():
 
     all_matches = {}
 
-    # Club leagues
+    # Club leagues — stagger requests to respect 10 req/min limit
     for code in LEAGUES:
         data = football_get(f"/competitions/{code}/matches?dateFrom={today}&dateTo={today}")
         if data:
@@ -891,6 +919,7 @@ def check_matches():
                     mx["_league_code"] = code
                     mx["_comp_name"]   = LEAGUES[code]
                 all_matches[code] = ms
+        time.sleep(6)  # 6s gap → max 10 requests/min, stays within free tier
 
     # Internationals
     intl = fetch_intl_today()
