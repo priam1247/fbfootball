@@ -49,15 +49,21 @@ def save_state():
 
 def livescore_get(path):
     if not LIVESCORE_KEY or not LIVESCORE_SECRET:
-        return None
+        print("[LIVESCORE] Missing credentials")
+        return {}
     try:
         sep = "&" if "?" in path else "?"
-        r = requests.get(f"https://livescore-api.com/api-client{path}{sep}key={LIVESCORE_KEY}&secret={LIVESCORE_SECRET}", timeout=15)
+        r = requests.get(
+            f"https://livescore-api.com/api-client{path}{sep}key={LIVESCORE_KEY}&secret={LIVESCORE_SECRET}",
+            timeout=15
+        )
         print(f"[LIVESCORE] Status: {r.status_code}")
         if r.status_code == 200:
             d = r.json()
             if d.get("success"):
                 return d.get("data", {})
+            else:
+                print(f"[LIVESCORE API Error]: {d.get('error')}")
     except Exception as e:
         print(f"[LIVESCORE ERROR] {e}")
     return {}
@@ -66,40 +72,40 @@ def post_to_facebook(msg):
     try:
         r = requests.post(FB_POST_URL, data={"message": msg, "access_token": FB_TOKEN}, timeout=10)
         if r.status_code == 200:
-            print(f"[POSTED] {msg[:80]}...")
+            print(f"[POSTED] {msg[:85]}...")
             return True
+        else:
+            print(f"[FB ERROR] {r.status_code}")
     except Exception as e:
         print(f"[FB ERROR] {e}")
     return False
 
-# Fixed Normalization for real Livescore structure
 def norm_ls(m):
     def clean(name):
         if not name: return ""
-        name = str(name).strip()
-        name = name.replace("The Netherlands", "Netherlands").replace("U21", "").replace("Women", "").strip()
-        return name
+        n = str(name).strip()
+        n = n.replace("The Netherlands", "Netherlands").replace("U21", "").replace("Women", "").strip()
+        return n
 
     home = clean(m.get("home", {}).get("name") or m.get("home_name"))
     away = clean(m.get("away", {}).get("name") or m.get("away_name"))
 
-    # Score
+    # Score from "scores": {"score": "2 - 1"}
     hs = as_ = 0
-    scores = m.get("scores", {}) or {}
-    score_str = scores.get("score", "")
-    if score_str and "-" in score_str:
-        try:
-            parts = score_str.replace(" ", "").split("-")
-            hs, as_ = int(parts[0]), int(parts[1])
-        except:
-            pass
+    try:
+        score_str = m.get("scores", {}).get("score", "")
+        if score_str and "-" in score_str:
+            parts = [x.strip() for x in score_str.split("-")]
+            if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
+                hs, as_ = int(parts[0]), int(parts[1])
+    except:
+        pass
 
-    # Status
     raw = str(m.get("status", "")).upper()
     status = {"IN PLAY": "IN_PLAY", "HALF TIME": "PAUSED", "FULL TIME": "FINISHED", "LIVE": "IN_PLAY"}.get(raw, "SCHEDULED")
 
-    comp = m.get("competition", {})
-    comp_name = comp.get("name", "International Friendly") if isinstance(comp, dict) else "International Friendly"
+    comp_obj = m.get("competition", {})
+    comp_name = comp_obj.get("name", "International Friendly") if isinstance(comp_obj, dict) else "International Friendly"
 
     return {
         "id": f"ls_{m.get('id','')}",
@@ -108,8 +114,7 @@ def norm_ls(m):
         "_comp_name": comp_name,
         "homeTeam": {"shortName": home},
         "awayTeam": {"shortName": away},
-        "score": {"fullTime": {"home": hs, "away": as_}},
-        "goals": []
+        "score": {"fullTime": {"home": hs, "away": as_}}
     }
 
 def is_important_match(m):
@@ -121,7 +126,7 @@ def is_important_match(m):
 
     if home in BIG_TEAMS or away in BIG_TEAMS:
         return True
-    if any(k in comp for k in ["friendly", "fifa", "finalissima", "series", "nations", "international"]):
+    if any(k in comp for k in ["friendly", "fifa", "series", "nations", "international"]):
         return True
     return False
 
@@ -129,14 +134,19 @@ def fetch_intl_today():
     today = datetime.utcnow().strftime("%Y-%m-%d")
     print(f"[INTL] Fetching internationals for {today}...")
 
-    matches = []
-    seen = set()
-
     data = livescore_get(f"/fixtures/matches.json?date={today}")
-    items = data.get("match", []) if isinstance(data, dict) else []
+    
+    # CRITICAL FIX: Get the "match" array correctly
+    items = []
+    if isinstance(data, dict):
+        items = data.get("match", [])
+    elif isinstance(data, list):
+        items = data
 
     print(f"[INTL] Raw matches received: {len(items)}")
 
+    matches = []
+    seen = set()
     for item in items:
         if isinstance(item, dict):
             norm = norm_ls(item)
@@ -149,10 +159,14 @@ def fetch_intl_today():
     print(f"[INTL] Filtered important matches: {len(matches)}")
     return matches
 
-# Keep your original helpers & process functions (simplified for speed)
 def get_score(m):
     ft = m.get("score", {}).get("fullTime", {})
-    return m["homeTeam"].get("shortName", ""), m["awayTeam"].get("shortName", ""), ft.get("home", 0), ft.get("away", 0)
+    return (
+        m["homeTeam"].get("shortName", ""),
+        m["awayTeam"].get("shortName", ""),
+        ft.get("home", 0),
+        ft.get("away", 0)
+    )
 
 def is_big_match(m):
     return m["homeTeam"].get("shortName", "") in BIG_TEAMS or m["awayTeam"].get("shortName", "") in BIG_TEAMS
@@ -165,14 +179,16 @@ def get_minute(m):
         return "?"
 
 def handle_live_update(m):
-    if not is_big_match(m): return
+    if not is_big_match(m):
+        return
     mid = m["id"]
-    if time.time() - match_last_update.get(mid, 0) < LIVE_UPDATE_INTERVAL: return
+    if time.time() - match_last_update.get(mid, 0) < LIVE_UPDATE_INTERVAL:
+        return
     home, away, hs, as_ = get_score(m)
     minute = get_minute(m)
     match_last_update[mid] = time.time()
     save_state()
-    msg = f"📍 {minute}' | {home} {hs}–{as_} {away}\n\n🔥 Big match live!"
+    msg = f"📍 {minute}' | {home} {hs}–{as_} {away}\n\n🔥 Big international match is live!"
     post_to_facebook(msg)
 
 def process(m):
@@ -184,28 +200,33 @@ def process(m):
             save_state()
             post_to_facebook(f"🟢 KICK OFF | {m['homeTeam']['shortName']} vs {m['awayTeam']['shortName']}")
         handle_live_update(m)
-    elif status == "PAUSED" and f"{m['id']}_halftime" not in posted_halftimes:
-        posted_halftimes.add(f"{m['id']}_halftime")
-        save_state()
-        home, away, hs, as_ = get_score(m)
-        post_to_facebook(f"⏸️ HALF TIME | {home} {hs}–{as_} {away}")
-    elif status == "FINISHED" and f"{m['id']}_fulltime" not in posted_ft:
-        posted_ft.add(f"{m['id']}_fulltime")
-        save_state()
-        home, away, hs, as_ = get_score(m)
-        post_to_facebook(f"🏁 FULL TIME | {home} {hs}–{as_} {away}")
+    elif status == "PAUSED":
+        key = f"{m['id']}_halftime"
+        if key not in posted_halftimes:
+            posted_halftimes.add(key)
+            save_state()
+            home, away, hs, as_ = get_score(m)
+            post_to_facebook(f"⏸️ HALF TIME | {home} {hs}–{as_} {away}")
+    elif status == "FINISHED":
+        key = f"{m['id']}_fulltime"
+        if key not in posted_ft:
+            posted_ft.add(key)
+            save_state()
+            home, away, hs, as_ = get_score(m)
+            post_to_facebook(f"🏁 FULL TIME | {home} {hs}–{as_} {away}")
 
 def post_daily_preview(matches):
     big = [m for m in matches if is_big_match(m)]
-    if not big: return
+    if not big:
+        return
     lines = [f"🔥 TODAY'S BIG INTERNATIONAL MATCHES ({datetime.utcnow().strftime('%d %b %Y')})\n"]
-    for m in big:
+    for m in big[:12]:
         lines.append(f"⚔️ {m['homeTeam']['shortName']} vs {m['awayTeam']['shortName']}")
-    lines.append("\nFollow ScoreLine Live 🔔")
+    lines.append("\nFollow ScoreLine Live for live updates 🔔")
     post_to_facebook("\n".join(lines))
 
 def run():
-    print(f"{PAGE_NAME} Bot v2.8 – Quick API Fix")
+    print(f"{PAGE_NAME} Bot v2.9 – Critical API Fix")
     preview_posted = False
     while True:
         try:
