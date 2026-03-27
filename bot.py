@@ -262,12 +262,21 @@ def post_to_facebook(msg):
     return False
 
 # ── Match importance score ────────────────────────────────────────
+def nation_score(name):
+    """Partial match so 'Spain U21', 'ESP', 'Spain' all hit TOP_NATIONS."""
+    if not name: return 0
+    nl = name.lower()
+    for n in TOP_NATIONS:
+        if n.lower() in nl or nl in n.lower():
+            return 10
+    return 0
+
 def importance(match):
     score = 0
     home  = match.get("homeTeam", {}).get("shortName", "")
     away  = match.get("awayTeam", {}).get("shortName", "")
-    if home in TOP_NATIONS: score += 10
-    if away in TOP_NATIONS: score += 10
+    score += nation_score(home)
+    score += nation_score(away)
     _cn = match.get("_comp_name","")
     comp = (_cn if isinstance(_cn, str) else "").lower()
     if any(k in comp for k in ["world cup","qualifier","playoff"]): score += 15
@@ -441,7 +450,8 @@ def fetch_intl_today():
                     "copa del rey","dfb-pokal","coppa italia","carabao"]
             INTL = ["world cup","qualifier","friendly","friendlies","nations league",
                     "international","afcon","gold cup","concacaf","copa america",
-                    "afc","uefa","fifa","playoff","amical","amistoso","olympics"]
+                    "afc","uefa","fifa","playoff","amical","amistoso","olympics",
+                    "qualification","euro","african","asian","conmebol","ofc"]
             INTL_C = {"world","europe","south america","north america","africa","asia","oceania"}
             SMAP   = {"NS":"SCHEDULED","TBD":"TIMED","1H":"IN_PLAY","2H":"IN_PLAY",
                       "ET":"IN_PLAY","P":"IN_PLAY","BT":"PAUSED","HT":"PAUSED",
