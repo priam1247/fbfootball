@@ -9,7 +9,7 @@ FB_PAGE_ID = os.getenv("FB_PAGE_ID")
 GEMINI_KEY = os.getenv("GEMINI_KEY")
 
 FB_POST_URL  = f"https://graph.facebook.com/{FB_PAGE_ID}/feed"
-GEMINI_URL   = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-8b:generateContent?key={GEMINI_KEY}"
+GEMINI_URL   = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key={GEMINI_KEY}"
 STATE_FILE   = "match_state.json"
 PAGE_NAME    = "ScoreLine Live"
 
